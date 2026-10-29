@@ -17,6 +17,8 @@ New-Item -ItemType Directory -Force $T | Out-Null
 Copy-Item fixtures\small.docx "$T\Volume I.docx"
 Copy-Item fixtures\large.docx "$T\Volume II.docx"
 Copy-Item fixtures\raw_small.docx "$T\Volume III not from Word.docx"
+# embedded and linked Excel objects, link fields to missing and network files (built by harness\ole_test.py)
+if (Test-Path results\ole_small\ole_word.docx) { Copy-Item results\ole_small\ole_word.docx "$T\Volume IV linked objects.docx" }
 if (Test-Path results\v2\puncture\P09_password.docx) { Copy-Item results\v2\puncture\P09_password.docx "$T\Protected.docx" }
 [IO.File]::WriteAllBytes("$Root\$T\Damaged.docx", [IO.File]::ReadAllBytes("$Root\fixtures\small.docx")[0..29999])
 $before = Get-ChildItem $T | ForEach-Object { "$($_.Name)|$((Get-FileHash $_.FullName).Hash)" }
@@ -32,11 +34,15 @@ $summary = [ordered]@{
   originals_identical = -not (Compare-Object $before $after)
   word_left_running = $left
   file_names_in_report = [bool]$names
+  word_link_option_check = $j.word_link_option_check
   documents = @($j.documents | ForEach-Object { [ordered]@{ id = $_.id; load = $_.load
       recipe_ok = if ($_.recipe) { -not ($_.recipe | Where-Object { -not $_.ok }) } else { $null }
       drift_before = @($_.word.before.resave_drift | Select-Object -Unique) -join ","
       drift_after = @($_.word.after.resave_drift | Select-Object -Unique) -join ","
-      pages = "$($_.word.before.pages)/$($_.word.after.pages)" } })
+      pages = "$($_.word.before.pages)/$($_.word.after.pages)"
+      word_stopped = "$($_.word.blocked_by_dialog)$($_.word.timed_out)"
+      linked_fields = $_.word.before.linked_fields_locked
+      option_restored = $_.word.links_option_restored } })
 }
 $summary | ConvertTo-Json -Depth 4 | Set-Content results\kit_summary_$ver.json
 Remove-Item -Recurse -Force dist\FormatCheck\FormatCheck_runs

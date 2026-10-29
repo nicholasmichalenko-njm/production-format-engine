@@ -1,4 +1,4 @@
-FormatCheck 0.1.1 - read-only field check for the production format engine
+FormatCheck 0.2.0 - read-only field check for the production format engine
 
 WHAT IT DOES
 FormatCheck tests the format engine on real proposal volumes without changing them.
@@ -26,5 +26,14 @@ The local copies are deleted at the end of the run (unless you use --keep).
 WHAT IT NEVER DOES
 - It never writes to the folder you pick.
 - It never uses the network.
-- It never opens your own Word window or changes your Word settings or Normal.dotm.
-- Each Word job has a time limit. If Word stops answering, FormatCheck ends only the Word it started.
+- It never opens your own Word window and never changes Normal.dotm.
+- Each Word job has a time limit. If Word stops answering or shows a dialog, FormatCheck ends only
+  the Word it started (identified by its process number), never a Word you opened.
+
+LINKED OBJECTS AND LINK FIELDS
+Volumes often hold linked Excel tables, INCLUDETEXT or INCLUDEPICTURE fields. FormatCheck never
+updates them: they would reach other files or network shares, and Word replaces a linked table with
+"Error! Not a valid link." when the source is not reachable. The report counts them per document.
+A hidden Word stops on a security notice for such files, so FormatCheck's own Word turns off
+"Update automatic links at open" for its session and sets it back before it closes. At the end of
+the run a fresh Word confirms the setting is what it was, and the report says so.

@@ -7,7 +7,7 @@ a = Analysis(
     pathex=[ROOT],
     hiddenimports=["engine", "engine.pkg", "engine.guard", "engine.fingerprint", "engine.ordered", "engine.safewrite",
                    "engine.ops", "engine.ops.word_ops", "engine.ops.glossary", "engine.ops.merge",
-                   "win32timezone", "win32com.client", "pythoncom", "pywintypes", "win32file"],
+                   "win32timezone", "win32com.client", "pythoncom", "pywintypes", "win32file", "win32gui", "win32process"],
     excludes=["pymupdf", "fitz", "openpyxl", "pptx", "PIL", "numpy", "setuptools", "pip", "unittest", "pydoc_data",
               "ssl", "_ssl", "http", "xmlrpc", "ftplib", "smtplib", "imaplib", "poplib", "nntplib", "urllib.request",
               "email.mime", "asyncio", "sqlite3"],

@@ -29,6 +29,7 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -40,11 +41,14 @@ from engine.fingerprint import fingerprint, logical, diff, fields as field_list
 from engine.ops import word_ops as ops
 from engine.ops import glossary as G
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 EXTS = (".docx", ".docm", ".dotx", ".dotm")
 STRUCT = ["text", "text_len", "deleted_text", "fields", "bookmarks", "bookmark_context", "tables", "drawings",
           "objects", "content_controls", "content_control_props", "revisions", "note_refs", "comment_refs",
           "section_count", "paragraphs", "alt_content", "hyperlinks", "media", "external_links"]
+
+# LINK, INCLUDETEXT, INCLUDEPICTURE, INCLUDE, DDE, DDEAUTO, IMPORT (Word WdFieldType values)
+EXTERNAL_FIELD_TYPES = {56, 68, 67, 36, 45, 46, 55}
 
 OPS = [  # name, function, args, allowed content facets
     ("hf_clean", ops.op_hf_clean, {}, ("fields",)),
@@ -189,12 +193,23 @@ def word_worker(before, after, out_json):
     import win32com.client
     res = {}
     pythoncom.CoInitialize()
+    pre = winword_pids()
     app = win32com.client.DispatchEx("Word.Application")
+    mine = [p for p in winword_pids() - pre if is_automation_word(p)]
+    if len(mine) == 1:
+        with open(out_json + ".pid", "w") as fh:
+            fh.write(str(mine[0]))
     try:
         res["word_build"] = app.Build
         app.Visible = False
         app.DisplayAlerts = 0
         app.ScreenUpdating = False
+        # Word shows a modal security notice for any document with fields that read other files when
+        # "Update automatic links at open" is on, and a hidden Word then waits forever. The option is turned
+        # off in this automation Word only and set back before Quit (tested: a forced stop never saves it,
+        # a normal Quit saves whatever value is set, so it must be set back first).
+        res["update_links_at_open_original"] = bool(app.Options.UpdateLinksAtOpen)
+        app.Options.UpdateLinksAtOpen = False
         for label, p in (("before", before), ("after", after)):
             if not p or not os.path.exists(p):
                 continue
@@ -211,9 +226,16 @@ def word_worker(before, after, out_json):
             r["resave_drift"] = [k.split("|", 1)[1] for k in diff(logical(Package(p)), logical(Package(resaved)))
                                  if k.split("|", 1)[1] in STRUCT]
             t = time.perf_counter()
+            linked = 0
             for story in doc.StoryRanges:
                 s = story
                 while s is not None:
+                    # fields that pull from other files are locked first: updating them reaches outside the PC
+                    # and, when the source is not reachable, Word replaces the linked table with an error
+                    for f in s.Fields:
+                        if f.Type in EXTERNAL_FIELD_TYPES and not f.Locked:
+                            f.Locked = True
+                            linked += 1
                     s.Fields.Update()
                     try:
                         s = s.NextStoryRange
@@ -224,6 +246,7 @@ def word_worker(before, after, out_json):
             for i in range(1, doc.TablesOfFigures.Count + 1):
                 doc.TablesOfFigures(i).Update()
             r["update_s"] = round(time.perf_counter() - t, 1)
+            r["linked_fields_locked"] = linked
             r["pages"] = doc.ComputeStatistics(2)
             errs = 0
             for f in doc.Fields:
@@ -240,15 +263,48 @@ def word_worker(before, after, out_json):
         res["worker_error"] = type(e).__name__
         res["worker_code"] = com_code(e)
     finally:
+        restored = False
+        try:
+            if "update_links_at_open_original" in res:
+                app.Options.UpdateLinksAtOpen = res["update_links_at_open_original"]
+                restored = bool(app.Options.UpdateLinksAtOpen) == res["update_links_at_open_original"]
+        except Exception:
+            pass
+        res["links_option_restored"] = restored
         try:
             app.NormalTemplate.Saved = True
         except Exception:
             pass
+        if restored or "update_links_at_open_original" not in res:
+            try:
+                app.Quit(0)
+            except Exception:
+                pass
+        # if it could not be set back, the Word is left to the watchdog: a forced stop does not save options
+    json.dump(res, open(out_json, "w"))
+
+
+def option_check(value):
+    """End of run: a fresh automation Word confirms the user's link setting is the value it had at the start."""
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    app = win32com.client.DispatchEx("Word.Application")
+    r = {}
+    try:
+        now = bool(app.Options.UpdateLinksAtOpen)
+        r["was"] = now
+        if now != value:
+            app.Options.UpdateLinksAtOpen = value
+            r["set_back"] = True
+        r["ok"] = bool(app.Options.UpdateLinksAtOpen) == value
+    finally:
         try:
+            app.NormalTemplate.Saved = True
             app.Quit(0)
         except Exception:
             pass
-    json.dump(res, open(out_json, "w"))
+    print(json.dumps(r))
 
 
 def com_code(e):
@@ -272,24 +328,97 @@ def winword_pids():
         return set()
 
 
+def is_automation_word(pid):
+    """True when the process is a Word started for automation (command line has /Automation or -Embedding),
+    never a Word a person opened."""
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                              f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"],
+                             capture_output=True, text=True, creationflags=0x08000000, timeout=30).stdout
+        return "WINWORD" in out.upper() and ("/AUTOMATION" in out.upper() or "-EMBEDDING" in out.upper())
+    except Exception:
+        return False
+
+
+def visible_dialogs(pid):
+    """Titles of visible dialog windows owned by the process (a blocked hidden Word shows one).
+    A title that could hold a file name is reported only as 'dialog'."""
+    try:
+        import win32gui, win32process
+    except Exception:
+        return []
+    found = []
+
+    def cb(h, _):
+        try:
+            if win32gui.IsWindowVisible(h) and win32process.GetWindowThreadProcessId(h)[1] == pid \
+                    and win32gui.GetClassName(h) in ("NUIDialog", "#32770", "bosa_sdm_msword"):
+                t = win32gui.GetWindowText(h) or "dialog"
+                found.append(t if not any(c in t for c in ".\\/:") else "dialog")
+        except Exception:
+            pass
+        return True
+    try:
+        win32gui.EnumWindows(cb, None)
+    except Exception:
+        pass
+    return found
+
+
+def end_word(pid_file):
+    """End only the Word this job started, and only if it is still that automation Word."""
+    try:
+        pid = int(open(pid_file).read().strip())
+    except Exception:
+        return False
+    if pid in winword_pids() and is_automation_word(pid):
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, creationflags=0x08000000)
+        return True
+    return False
+
+
 def run_word(before, after, timeout):
     out_json = after + ".wordcheck.json"
+    pid_file = out_json + ".pid"
     exe = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, os.path.abspath(__file__)]
-    pre = winword_pids()
     t = time.perf_counter()
     proc = subprocess.Popen(exe + ["--word-worker", before, after, out_json], creationflags=0x08000000)
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    stop = None
+    while proc.poll() is None:
+        if time.perf_counter() - t > timeout:
+            stop = {"timed_out": True}
+            break
+        pid = None
+        try:
+            pid = int(open(pid_file).read().strip())
+        except Exception:
+            pass
+        if pid:
+            d = visible_dialogs(pid)
+            if d:
+                stop = {"blocked_by_dialog": d[0]}
+                break
+        time.sleep(2)
+    if stop is not None:
         proc.kill()
-        mine = winword_pids() - pre  # only a Word that started during this job
-        for pid in mine:
-            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, creationflags=0x08000000)
-        return {"timed_out": True, "seconds": round(time.perf_counter() - t, 1), "word_processes_ended": len(mine)}
+        stop["word_ended"] = end_word(pid_file)
+        if not stop["word_ended"]:
+            stop["word_left_running"] = True  # could not be identified for sure: never end a Word we did not start
+        stop["seconds"] = round(time.perf_counter() - t, 1)
+        for f in (pid_file, out_json):
+            if os.path.exists(f):
+                os.remove(f)
+        return stop
     if not os.path.exists(out_json):
+        if os.path.exists(pid_file):
+            os.remove(pid_file)
         return {"worker_failed": True}
     r = json.load(open(out_json))
     os.remove(out_json)
+    if "update_links_at_open_original" in r and not r.get("links_option_restored"):
+        r["word_ended_unsaved"] = end_word(pid_file)  # a forced stop never saves the changed option
+    if os.path.exists(pid_file):
+        os.remove(pid_file)
     r["seconds"] = round(time.perf_counter() - t, 1)
     return r
 
@@ -311,12 +440,19 @@ def write_report(run_dir, data):
             d["id"], d.get("load", ""), d.get("structure", {}).get("paragraphs", ""), d.get("structure", {}).get("tables", ""),
             d.get("structure", {}).get("sections", ""), guard_trips, errors,
             "" if rec_ok is None else ("all steps" if rec_ok else "stopped: " + ", ".join(f'{s["op"]} ({s["why"]})' for s in steps if not s["ok"])),
-            after.get("open", wk.get("timed_out") and "timed out" or ""), ", ".join(after.get("resave_drift", [])) or ("none" if after else ""),
+            after.get("open", (wk.get("blocked_by_dialog") and "blocked: " + wk["blocked_by_dialog"]) or (wk.get("timed_out") and "timed out") or ""), ", ".join(after.get("resave_drift", [])) or ("none" if after else ""),
             wk.get("before", {}).get("pages", ""), after.get("pages", ""),
             wk.get("before", {}).get("fields_with_error_after_update", ""), after.get("fields_with_error_after_update", ""),
+            wk.get("before", {}).get("linked_fields_locked", ""),
             "yes" if d.get("original_untouched") else "NO"]) + "</tr>")
+    oc = data.get("word_link_option_check")
+    option_line = ("" if oc is None else
+                   "Word setting 'Update automatic links at open': unchanged at the end of the run." if oc.get("ok") and not oc.get("set_back") else
+                   "Word setting 'Update automatic links at open' was found changed and was set back." if oc.get("ok") else
+                   "Word setting 'Update automatic links at open' could not be confirmed: check it in Word Options, Advanced, General.")
     head = ["Doc", "Load", "Paragraphs", "Tables", "Sections", "Guard trips", "Op errors", "Recipe on copy",
             "Word opens result", "Word re-save drift", "Pages before", "Pages after", "Broken refs before", "Broken refs after",
+            "Linked fields (not updated)",
             "Original untouched"]
     page = f"""<!doctype html><html><head><meta charset="utf-8"><title>FormatCheck report</title>
 <style>body{{font:14px Segoe UI,system-ui,sans-serif;margin:24px;color:#14202e}}table{{border-collapse:collapse}}
@@ -324,6 +460,7 @@ td,th{{border:1px solid #ccd;padding:6px 8px;text-align:left;vertical-align:top}
 <h1>FormatCheck report</h1>
 <p>Version {VERSION}. Run {html.escape(data['run'])}. {len(data['documents'])} documents. Counts only: no document text and no file names.
 The key from Doc-N to file stays on this PC in the work folder.</p>
+<p>{html.escape(option_line)}</p>
 <p>Originals untouched: <b>{sum(1 for d in data['documents'] if d.get('original_untouched'))} of {len(data['documents'])}</b>.
 Word available: {data.get('word_available')}.</p>
 <table><tr>{''.join(f'<th>{h}</th>' for h in head)}</tr>{''.join(rows)}</table>
@@ -349,6 +486,9 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--word-worker":
         word_worker(sys.argv[2], sys.argv[3], sys.argv[4])
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "--option-check":
+        option_check(sys.argv[2] == "1")
+        return
     ap = argparse.ArgumentParser()
     ap.add_argument("folder", nargs="?")
     ap.add_argument("--no-word", action="store_true")
@@ -372,6 +512,7 @@ def main():
     base = os.path.join(a.work or os.path.join(HERE, "FormatCheck_runs"), f"run_{stamp}")
     os.makedirs(base, exist_ok=True)
     keymap = open(os.path.join(base, "KEY_stays_on_this_PC.txt"), "w", encoding="utf-8")
+    links_option = None
     word_ok = (not a.no_word) and sys.platform == "win32"
     data = {"version": VERSION, "run": stamp, "word_available": word_ok, "documents": []}
     print(f"FormatCheck {VERSION}: {len(files)} documents. Work folder: {base}")
@@ -403,11 +544,32 @@ def main():
             d["recipe"] = recipe(work)
             if word_ok and ext in (".docx", ".docm"):
                 print(f"  {did}: Word check (up to {a.timeout} s)")
-                d["word"] = run_word(before_copy, work, a.timeout)
+                # a fresh name for every Word job: after a forced stop Word remembers the file name and asks
+                # "it caused a serious error, open it anyway?" the next time a file of that name opens
+                tag = uuid.uuid4().hex[:8]
+                wb, wa = os.path.join(base, f"{did}_{tag}_b{ext}"), os.path.join(base, f"{did}_{tag}_a{ext}")
+                shutil.copyfile(before_copy, wb); shutil.copyfile(work, wa)
+                try:
+                    d["word"] = run_word(wb, wa, a.timeout)
+                except Exception as e:
+                    d["word"] = {"worker_failed": True, "why": type(e).__name__}
+                for f in (wb, wa):
+                    if os.path.exists(f):
+                        os.remove(f)
+                if "update_links_at_open_original" in d["word"] and links_option is None:
+                    links_option = d["word"]["update_links_at_open_original"]
         d["original_untouched"] = sha(src) == h0
         data["documents"].append(d)
         write_report(base, data)
     keymap.close()
+    if links_option is not None:
+        exe = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, os.path.abspath(__file__)]
+        try:
+            out = subprocess.run(exe + ["--option-check", "1" if links_option else "0"], capture_output=True, text=True,
+                                 timeout=120, creationflags=0x08000000).stdout
+            data["word_link_option_check"] = json.loads(out.strip().splitlines()[-1])
+        except Exception as e:
+            data["word_link_option_check"] = {"ok": None, "why": type(e).__name__}
     if not a.keep:
         for f in os.listdir(base):
             p = os.path.join(base, f)
