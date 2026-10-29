@@ -1,0 +1,27 @@
+# environment and build output
+venv/
+build/
+dist/
+__pycache__/
+*.pyc
+*.zip
+
+# test output: holds local paths and generated copies, never committed
+results/
+FormatCheck_runs/
+_PE_Snapshots/
+~pe_tmp_*
+~$*
+
+# transfer folders used while building the lab
+_in*/
+
+# one-off chained run scripts (scripts/run_all.ps1 is the kept one)
+run_v2b.ps1
+run_v2c.ps1
+run_v3.ps1
+run_v4.ps1
+run_all_v2.ps1
+
+# never commit real proposal content: real documents go only through FormatCheck, on the work PC
+*.real.docx

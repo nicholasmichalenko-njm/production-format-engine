@@ -1,0 +1,267 @@
+{
+ "captions": [
+  {
+   "chapter": 1,
+   "kind": "Table",
+   "appendix": false,
+   "defect": "mergeformat",
+   "title": "Integrated Docking Adapter Summary"
+  },
+  {
+   "chapter": 1,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Safety Review Flow"
+  },
+  {
+   "chapter": 1,
+   "kind": "Table",
+   "appendix": false,
+   "defect": "wrong_ident",
+   "title": "Measured Mission Assurance Summary"
+  },
+  {
+   "chapter": 1,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Independent Payload Integration Summary"
+  },
+  {
+   "chapter": 1,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Safety Review Flow"
+  },
+  {
+   "chapter": 2,
+   "kind": "Table",
+   "appendix": false,
+   "defect": "wrong_ident",
+   "title": "Measured Ground Segment Summary"
+  },
+  {
+   "chapter": 2,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Systems Engineering Plan Flow"
+  },
+  {
+   "chapter": 2,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Proven Quality Plan Summary"
+  },
+  {
+   "chapter": 2,
+   "kind": "Table",
+   "appendix": false,
+   "defect": "typed",
+   "title": "Proven Launch Campaign Summary"
+  },
+  {
+   "chapter": 2,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Safety Review Flow"
+  },
+  {
+   "chapter": 3,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Traceable Systems Engineering Plan Summary"
+  },
+  {
+   "chapter": 3,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Thermal Model Flow"
+  },
+  {
+   "chapter": 3,
+   "kind": "Table",
+   "appendix": false,
+   "defect": "typed",
+   "title": "Measured Flight Software Summary"
+  },
+  {
+   "chapter": 3,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Traceable Verification Matrix Summary"
+  },
+  {
+   "chapter": 3,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Payload Integration Flow"
+  },
+  {
+   "chapter": 4,
+   "kind": "Table",
+   "appendix": false,
+   "defect": "typed",
+   "title": "Flight-Qualified Test Campaign Summary"
+  },
+  {
+   "chapter": 4,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Safety Review Flow"
+  },
+  {
+   "chapter": 4,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Independent Power Subsystem Summary"
+  },
+  {
+   "chapter": 4,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Measured Verification Matrix Summary"
+  },
+  {
+   "chapter": 4,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Safety Review Flow"
+  },
+  {
+   "chapter": 5,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Independent Risk Register Summary"
+  },
+  {
+   "chapter": 5,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Crew Module Flow"
+  },
+  {
+   "chapter": 5,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Integrated Launch Campaign Summary"
+  },
+  {
+   "chapter": 5,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Traceable Supply Chain Summary"
+  },
+  {
+   "chapter": 5,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Docking Adapter Flow"
+  },
+  {
+   "chapter": 5,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Flight-Qualified Flight Software Summary"
+  },
+  {
+   "chapter": 6,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Repeatable Docking Adapter Summary"
+  },
+  {
+   "chapter": 6,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Configuration Baseline Flow"
+  },
+  {
+   "chapter": 6,
+   "kind": "Table",
+   "appendix": false,
+   "defect": null,
+   "title": "Repeatable Risk Register Summary"
+  },
+  {
+   "chapter": 6,
+   "kind": "Table",
+   "appendix": false,
+   "defect": "no_s",
+   "title": "Repeatable Power Subsystem Summary"
+  },
+  {
+   "chapter": 6,
+   "kind": "Figure",
+   "appendix": false,
+   "defect": null,
+   "title": "Payload Integration Flow"
+  },
+  {
+   "chapter": 100,
+   "kind": "Table",
+   "appendix": true,
+   "defect": null,
+   "title": "Repeatable Flight Software Summary"
+  },
+  {
+   "chapter": 100,
+   "kind": "Table",
+   "appendix": true,
+   "defect": null,
+   "title": "Modular Program Schedule Summary"
+  },
+  {
+   "chapter": 101,
+   "kind": "Table",
+   "appendix": true,
+   "defect": null,
+   "title": "Integrated Flight Software Summary"
+  },
+  {
+   "chapter": 101,
+   "kind": "Table",
+   "appendix": true,
+   "defect": null,
+   "title": "Low-Risk Test Campaign Summary"
+  }
+ ],
+ "broken_refs": [
+  "_Ref900000004"
+ ],
+ "tables": 23,
+ "figures": 12,
+ "sections": [
+  "cover",
+  "front",
+  "chapter",
+  "chapter",
+  "chapter",
+  "chapter",
+  "chapter",
+  "landscape",
+  "chapter",
+  "appendix",
+  "appendix"
+ ]
+}

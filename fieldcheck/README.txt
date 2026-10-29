@@ -1,0 +1,30 @@
+FormatCheck 0.1.0 - read-only field check for the production format engine
+
+WHAT IT DOES
+FormatCheck tests the format engine on real proposal volumes without changing them.
+- It reads each Word file in the folder you pick one time, to make a local copy.
+- Everything happens on the copies, in a work folder next to FormatCheck.exe:
+  FormatCheck_runs\run_<date-time>
+- It runs every engine operation on each copy and records whether the safety guard held.
+- If Word is installed, Word opens each copy and each result in a hidden session with macros off,
+  and reports pages, broken cross-references, and any change Word made when it saved.
+- At the end it checks that every original is byte for byte the same as before.
+
+HOW TO RUN
+1. Unzip the FormatCheck folder to a local folder on the PC (for example Documents).
+   Do not put it in a OneDrive or SharePoint folder: the copies of your volumes go next to it.
+2. Double-click FormatCheck.exe and pick the folder with the volumes.
+   Or from a command prompt:  FormatCheck.exe "C:\path\to\volumes" [--recursive] [--no-word] [--keep]
+3. The report opens in your browser when the run ends. A 500-page volume takes about 5 minutes with Word.
+
+WHAT TO SHARE
+FormatCheck_report.html and FormatCheck_report.json hold counts only: no document text and no file
+names. Documents show as Doc-1, Doc-2 and so on.
+KEY_stays_on_this_PC.txt maps Doc-N to the file. Keep it on this PC.
+The local copies are deleted at the end of the run (unless you use --keep).
+
+WHAT IT NEVER DOES
+- It never writes to the folder you pick.
+- It never uses the network.
+- It never opens your own Word window or changes your Word settings or Normal.dotm.
+- Each Word job has a time limit. If Word stops answering, FormatCheck ends only the Word it started.
