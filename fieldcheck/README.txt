@@ -1,4 +1,4 @@
-FormatCheck 0.1.0 - read-only field check for the production format engine
+FormatCheck 0.1.1 - read-only field check for the production format engine
 
 WHAT IT DOES
 FormatCheck tests the format engine on real proposal volumes without changing them.

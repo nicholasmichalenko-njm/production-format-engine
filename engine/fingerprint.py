@@ -3,6 +3,7 @@
 Every key is "<story part>|<facet>". An operation declares which facets it may change;
 any other difference is a violation and the write is refused.
 """
+import copy
 import fnmatch
 import hashlib
 from lxml import etree
@@ -183,3 +184,114 @@ def diff(before, after, allowed=()):
             continue
         out.append(k)
     return out
+
+
+# ---------------------------------------------------------------------------------------------
+# Logical view: the same facets, keyed by what the reader sees instead of by part name.
+# Word re-saves a document under its own part layout: it gives every section its own copy of an
+# inherited header or footer, renames header1.xml to header7.xml, adds an endnotes part that holds
+# only the separator lines, and renumbers drawing and content-control ids. None of that changes the
+# document. fingerprint() is keyed by part name, which is right for proving an engine operation
+# (the engine never renames parts), but it reports every one of those as a change when comparing a
+# file with Word's re-save of it. logical() resolves headers and footers per section, drops note
+# separators and ignores ids, so a Word re-save of an unchanged document compares equal.
+
+HF_TYPES = ("default", "first", "even")
+NOTE_SKIP = ("separator", "continuationSeparator", "continuationNotice")
+
+
+def _strip_ids(root, *tags):
+    out = []
+    for e in root.iter(*tags):
+        c = etree.fromstring(etree.tostring(e))
+        for i in list(c.iter(f"{{{W}}}id")):
+            i.getparent().remove(i)
+        for el in c.iter():
+            for a in [a for a in el.attrib if a.endswith("}id") or a == "id"]:
+                del el.attrib[a]
+        out.append(etree.tostring(c, method="c14n"))
+    return _h(b"".join(out))
+
+
+def _facets(pkg, part, root):
+    vt = visible_text(root)
+    rels = pkg.rels_of(part) if part else {}
+    names, _ = bookmarks(root)
+    return {
+        "text": _h(vt), "text_len": len(vt), "deleted_text": _h(deleted_text(root)),
+        "paragraphs": sum(1 for _ in root.iter(WP)), "fields": tuple(fields(root)),
+        "bookmarks": tuple(names), "bookmark_context": bookmark_context(root), "tables": tuple(tables(root)),
+        "drawings": sum(1 for _ in root.iter(f"{{{W}}}drawing")) + sum(1 for _ in root.iter(f"{{{W}}}pict")),
+        "objects": sum(1 for _ in root.iter(f"{{{W}}}object")),
+        "content_controls": sum(1 for _ in root.iter(f"{{{W}}}sdt")),
+        "content_control_props": _strip_ids(root, f"{{{W}}}sdtPr", f"{{{W}}}ffData"),
+        "revisions": tuple((t, sum(1 for _ in root.iter(f"{{{W}}}{t}"))) for t in REV_TAGS),
+        "note_refs": sum(1 for _ in root.iter(f"{{{W}}}footnoteReference", f"{{{W}}}endnoteReference")),
+        "comment_refs": sum(1 for _ in root.iter(f"{{{W}}}commentReference")),
+        "alt_content": sum(1 for _ in root.iter(MC)),
+        "hyperlinks": tuple(((rels.get(h.get(f"{{{R}}}id")) or (None, None, None))[1], h.get(f"{{{W}}}anchor"))
+                            for h in root.iter(f"{{{W}}}hyperlink")),
+    }
+
+
+def _empty_hf(f):
+    return f is None or (f["text_len"] == 0 and not f["drawings"] and not f["fields"] and not f["tables"]
+                         and not f["objects"] and not f["content_controls"])
+
+
+def logical(pkg):
+    fp = {}
+    main = pkg.tree(pkg.main)
+    for k, v in _facets(pkg, pkg.main, main).items():
+        fp["body|" + k] = v
+    fp["body|section_count"] = sum(1 for _ in main.iter(f"{{{W}}}sectPr"))
+    rels = pkg.rels_of(pkg.main)
+    settings = pkg.word_part("/settings")
+    even = settings is not None and pkg.tree(settings).find("w:evenAndOddHeaders", NS) is not None
+    sects = [s for s in main.iter(f"{{{W}}}sectPr") if s.getparent().tag != f"{{{W}}}pPrChange"
+             and s.getparent().tag != f"{{{W}}}sectPrChange"]
+    cache, eff = {}, {}
+    for n, s in enumerate(sects, 1):
+        title = s.find("w:titlePg", NS) is not None and s.find("w:titlePg", NS).get(f"{{{W}}}val") not in ("0", "false")
+        for kind in ("header", "footer"):
+            for ref in s.findall(f"w:{kind}Reference", NS):
+                t = rels.get(ref.get(f"{{{R}}}id"))
+                eff[(kind, ref.get(f"{{{W}}}type") or "default")] = t[1] if t else None
+            for typ in HF_TYPES:
+                if (typ == "first" and not title) or (typ == "even" and not even):
+                    continue
+                part = eff.get((kind, typ))
+                if part not in cache:
+                    cache[part] = _facets(pkg, part, pkg.tree(part)) if part in pkg.raw else None
+                f = cache[part]
+                if _empty_hf(f):
+                    continue
+                for k, v in f.items():
+                    fp[f"sec{n}:{kind}:{typ}|{k}"] = v
+    for kind in ("footnotes", "endnotes"):
+        part = pkg.word_part("/" + kind)
+        holder = etree.Element("holder")
+        if part:
+            for note in pkg.tree(part):
+                if note.get(f"{{{W}}}type") not in NOTE_SKIP:
+                    holder.append(copy.deepcopy(note))
+        if len(holder):
+            for k, v in _facets(pkg, part, holder).items():
+                fp[f"{kind}|{k}"] = v
+    cp = pkg.word_part("/comments")
+    if cp:
+        for k, v in _facets(pkg, cp, pkg.tree(cp)).items():
+            fp["comments|" + k] = v
+    media, external = set(), set()
+    for part in list(pkg.raw):
+        if part.endswith(".rels") or part.startswith("word/glossary"):
+            continue
+        for rid, (typ, tgt, mode) in pkg.rels_of(part).items():
+            if mode == "External":
+                if not typ.endswith("/hyperlink"):
+                    external.add(tgt)
+            elif tgt in pkg.raw and typ.endswith(("/image", "/oleObject", "/package", "/chart", "/diagramData")):
+                media.add(_h(pkg.raw[tgt]))
+    fp["package|media"] = tuple(sorted(media))
+    fp["package|external_links"] = tuple(sorted(external))
+    return fp

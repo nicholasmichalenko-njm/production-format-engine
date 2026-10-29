@@ -36,11 +36,11 @@ sys.path.insert(0, HERE)
 
 from engine import safewrite
 from engine.pkg import Package, Refused, W, NS
-from engine.fingerprint import fingerprint, diff, fields as field_list
+from engine.fingerprint import fingerprint, logical, diff, fields as field_list
 from engine.ops import word_ops as ops
 from engine.ops import glossary as G
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 EXTS = (".docx", ".docm", ".dotx", ".dotm")
 STRUCT = ["text", "text_len", "deleted_text", "fields", "bookmarks", "bookmark_context", "tables", "drawings",
           "objects", "content_controls", "content_control_props", "revisions", "note_refs", "comment_refs",
@@ -208,7 +208,7 @@ def word_worker(before, after, out_json):
             r = {"open": "ok", "open_s": round(time.perf_counter() - t, 1)}
             resaved = p + ".word.docx"
             doc.SaveAs2(os.path.abspath(resaved), 16)
-            r["resave_drift"] = [k.split("|", 1)[1] for k in diff(fingerprint(Package(p)), fingerprint(Package(resaved)))
+            r["resave_drift"] = [k.split("|", 1)[1] for k in diff(logical(Package(p)), logical(Package(resaved)))
                                  if k.split("|", 1)[1] in STRUCT]
             t = time.perf_counter()
             for story in doc.StoryRanges:
