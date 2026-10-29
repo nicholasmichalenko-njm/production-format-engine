@@ -14,7 +14,11 @@ What it measures on each copy:
   5. With Word installed: Word opens the copy and the result, re-saves them, reports pages, broken
      references and any structural drift. Each Word job runs in its own worker under a time limit.
 
-Usage: FormatCheck.exe [folder] [--no-word] [--keep] [--timeout 900]
+Usage: FormatCheck.exe                      opens the FormatCheck window
+       FormatCheck.exe <folder> [--no-word] [--keep] [--timeout 900] [--recursive]   runs without the window
+
+Diagnostics: content-free error and activity logs in the logs folder next to the program (diag.py); feedback reports in
+the feedback folder; Export for Claude makes one text-only zip (feedback.py). Nothing is sent anywhere.
 """
 import argparse
 import collections
@@ -40,8 +44,12 @@ from engine.pkg import Package, Refused, W, NS
 from engine.fingerprint import fingerprint, logical, diff, fields as field_list
 from engine.ops import word_ops as ops
 from engine.ops import glossary as G
+import diag
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
+LOG_DIR = os.path.join(HERE, "logs")
+RUNS_DIR = os.path.join(HERE, "FormatCheck_runs")
+FIELD_KIND = __import__("re").compile(r"^[A-Z][A-Z0-9]{0,19}$")
 EXTS = (".docx", ".docm", ".dotx", ".dotm")
 STRUCT = ["text", "text_len", "deleted_text", "fields", "bookmarks", "bookmark_context", "tables", "drawings",
           "objects", "content_controls", "content_control_props", "revisions", "note_refs", "comment_refs",
@@ -68,6 +76,23 @@ def sha(path):
         for b in iter(lambda: f.read(1 << 20), b""):
             h.update(b)
     return h.hexdigest()
+
+
+CATEGORIES = ("not a zip", "damaged", "not well-formed", "DOCTYPE", "zip bomb", "Unsafe part name", "encrypted",
+              "Strict Open XML", "altChunk", "bound to data", "marked as final", "not a Word", "digital signature",
+              "Restrict Editing", "write-protected", "read-only", "open", "touch elements it did not declare",
+              "alter content", "Field changes do not match", "Element order problem", "operation stopped",
+              "changed on disk", "differs from the checked result", "Untouched part", "snapshot", "could not copy")
+KNOWN_DIALOGS = ("Microsoft Word Security Notice", "Microsoft Word", "Password", "File Conversion", "Show Repairs",
+                 "Convert File", "Save As", "Open", "Find and Replace", "Microsoft Visual Basic for Applications")
+WORD_FIELDS = ("ADDRESSBLOCK ADVANCE ASK AUTHOR AUTONUM AUTONUMLGL AUTONUMOUT AUTOTEXT AUTOTEXTLIST BARCODE BIBLIOGRAPHY "
+               "BIDIOUTLINE CITATION COMMENTS COMPARE CREATEDATE DATABASE DATE DISPLAYBARCODE DOCPROPERTY DOCVARIABLE "
+               "EDITTIME EQ FILENAME FILESIZE FILLIN FORMCHECKBOX FORMDROPDOWN FORMTEXT GOTOBUTTON GREETINGLINE HYPERLINK "
+               "IF INCLUDEPICTURE INCLUDETEXT INDEX INFO KEYWORDS LASTSAVEDBY LINK LISTNUM MACROBUTTON MERGEBARCODE "
+               "MERGEFIELD MERGEREC MERGESEQ NEXT NEXTIF NOTEREF NUMCHARS NUMPAGES NUMWORDS PAGE PAGEREF PRINT PRINTDATE "
+               "PRIVATE QUOTE RD REF REVNUM SAVEDATE SECTION SECTIONPAGES SEQ SET SKIPIF STYLEREF SUBJECT SYMBOL TA TC "
+               "TEMPLATE TIME TITLE TOA TOC USERADDRESS USERINITIALS USERNAME XE DDE DDEAUTO IMPORT INCLUDE EMBED SHAPE "
+               "CONTROL DATA GLOSSARY").split()
 
 
 def category(msg):
@@ -111,7 +136,8 @@ def structure(pkg):
     kinds = collections.Counter()
     for story in pkg.stories():
         for ins in field_list(pkg.tree(story)):
-            kinds[(ins.split(" ")[0] if ins else "").upper() or "EMPTY"] += 1
+            k = (ins.split(" ")[0] if ins else "").upper() or "EMPTY"
+            kinds[k if k in WORD_FIELDS or k == "EMPTY" else "OTHER"] += 1  # Word's own field keywords only
     s["fields"] = dict(kinds.most_common(15))
     s["bookmarks"] = sum(1 for _ in root.iter(f"{{{W}}}bookmarkStart"))
     s["tracked_changes"] = sum(1 for _ in root.iter(f"{{{W}}}ins")) + sum(1 for _ in root.iter(f"{{{W}}}del"))
@@ -163,10 +189,15 @@ def dry_ops(path):
             rec["result"] = "refused"
             rec["why"] = category(e)
             if rec["why"] == "touch elements it did not declare":
+                diag.warning("guard", "Guard refused an operation in memory", exc=True)
+            elif rec["why"] == "other":
+                diag.warning("engine", "Operation refused for an unlisted reason", exc=True)
+            if rec["why"] == "touch elements it did not declare":
                 rec["guard"] = guard_detail(e)
         except Exception as e:
             rec["result"] = "error"
             rec["why"] = type(e).__name__
+            diag.error("engine", "Operation raised an error in memory", exc=True)
         rec["seconds"] = round(time.perf_counter() - t, 2)
         out[name] = rec
     return out
@@ -181,8 +212,11 @@ def recipe(path):
             steps.append({"op": name, "ok": True, "changed": r.changed, "seconds": round(time.perf_counter() - t, 2)})
         except Refused as e:
             steps.append({"op": name, "ok": False, "why": category(e), "seconds": round(time.perf_counter() - t, 2)})
+            if category(e) not in ("open", "read-only", "write-protected"):
+                diag.warning("recipe", "Recipe step refused", exc=True)
         except Exception as e:
             steps.append({"op": name, "ok": False, "why": "error " + type(e).__name__, "seconds": round(time.perf_counter() - t, 2)})
+            diag.error("recipe", "Recipe step raised an error", exc=True)
     return steps
 
 
@@ -191,6 +225,7 @@ def word_worker(before, after, out_json):
     """Runs in a separate process. Opens both copies in a new hidden Word, macros off, never the user's Word."""
     import pythoncom
     import win32com.client
+    diag.setup(LOG_DIR, VERSION, role="word_worker", crash_capture=False)
     res = {}
     pythoncom.CoInitialize()
     pre = winword_pids()
@@ -219,6 +254,7 @@ def word_worker(before, after, out_json):
                 doc = app.Documents.Open(os.path.abspath(p), False, False, False, "", "", True, "", "", 0, 0, False, False, 0, True)
             except Exception as e:
                 res[label] = {"open": "failed", "why": type(e).__name__, "code": com_code(e)}
+                diag.error("word", "Word could not open a copy", exc=True, **(com_code(e) or {}))
                 continue
             r = {"open": "ok", "open_s": round(time.perf_counter() - t, 1)}
             resaved = p + ".word.docx"
@@ -254,7 +290,7 @@ def word_worker(before, after, out_json):
                     if "Error!" in (f.Result.Text or ""):
                         errs += 1
                 except Exception:
-                    pass
+                    diag.swallowed("word")
             r["fields_with_error_after_update"] = errs
             doc.Close(0)
             os.remove(resaved)
@@ -262,6 +298,7 @@ def word_worker(before, after, out_json):
     except Exception as e:
         res["worker_error"] = type(e).__name__
         res["worker_code"] = com_code(e)
+        diag.error("word", "Word check stopped with an error", exc=True, **(com_code(e) or {}))
     finally:
         restored = False
         try:
@@ -269,7 +306,7 @@ def word_worker(before, after, out_json):
                 app.Options.UpdateLinksAtOpen = res["update_links_at_open_original"]
                 restored = bool(app.Options.UpdateLinksAtOpen) == res["update_links_at_open_original"]
         except Exception:
-            pass
+            diag.error("word", "Could not set the link option back", exc=True)
         res["links_option_restored"] = restored
         try:
             app.NormalTemplate.Saved = True
@@ -281,10 +318,11 @@ def word_worker(before, after, out_json):
             except Exception:
                 pass
         # if it could not be set back, the Word is left to the watchdog: a forced stop does not save options
+    diag.shutdown()
     json.dump(res, open(out_json, "w"))
 
 
-def option_check(value):
+def option_check(value, out_path):
     """End of run: a fresh automation Word confirms the user's link setting is the value it had at the start."""
     import pythoncom
     import win32com.client
@@ -298,23 +336,26 @@ def option_check(value):
             app.Options.UpdateLinksAtOpen = value
             r["set_back"] = True
         r["ok"] = bool(app.Options.UpdateLinksAtOpen) == value
+    except Exception:
+        diag.setup(LOG_DIR, VERSION, role="word_worker", crash_capture=False)
+        diag.error("word", "Link option check failed", exc=True)
+        r["ok"] = None
     finally:
         try:
             app.NormalTemplate.Saved = True
             app.Quit(0)
         except Exception:
             pass
-    print(json.dumps(r))
+    json.dump(r, open(out_path, "w"))
 
 
 def com_code(e):
-    """HRESULT and Word's own error number and message, with any file path removed."""
+    """HRESULT and Word's own error number only. Word's message is never kept: it can name the document."""
     try:
         h = getattr(e, "hresult", None)
         info = getattr(e, "excepinfo", None) or ()
-        desc = str(info[2]) if len(info) > 2 and info[2] else ""
-        desc = " ".join(w for w in desc.split() if "\\" not in w and "/" not in w and ":" not in w)[:160]
-        return {"hresult": h, "scode": info[5] if len(info) > 5 else None, "message": desc}
+        sc = info[5] if len(info) > 5 else None
+        return {k: v for k, v in (("hresult", h), ("scode", sc)) if isinstance(v, int)}
     except Exception:
         return None
 
@@ -325,6 +366,7 @@ def winword_pids():
                              capture_output=True, text=True, creationflags=0x08000000).stdout
         return {int(line.split('","')[1]) for line in out.splitlines() if line.startswith('"WINWORD')}
     except Exception:
+        diag.swallowed("word")
         return set()
 
 
@@ -337,6 +379,7 @@ def is_automation_word(pid):
                              capture_output=True, text=True, creationflags=0x08000000, timeout=30).stdout
         return "WINWORD" in out.upper() and ("/AUTOMATION" in out.upper() or "-EMBEDDING" in out.upper())
     except Exception:
+        diag.swallowed("word")
         return False
 
 
@@ -354,14 +397,14 @@ def visible_dialogs(pid):
             if win32gui.IsWindowVisible(h) and win32process.GetWindowThreadProcessId(h)[1] == pid \
                     and win32gui.GetClassName(h) in ("NUIDialog", "#32770", "bosa_sdm_msword"):
                 t = win32gui.GetWindowText(h) or "dialog"
-                found.append(t if not any(c in t for c in ".\\/:") else "dialog")
+                found.append(t if t in KNOWN_DIALOGS else "dialog")  # an unknown title could name a document
         except Exception:
             pass
         return True
     try:
         win32gui.EnumWindows(cb, None)
     except Exception:
-        pass
+        diag.swallowed("word")
     return found
 
 
@@ -383,6 +426,7 @@ def run_word(before, after, timeout):
     exe = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, os.path.abspath(__file__)]
     t = time.perf_counter()
     proc = subprocess.Popen(exe + ["--word-worker", before, after, out_json], creationflags=0x08000000)
+    diag.activity("word_job_started")
     stop = None
     while proc.poll() is None:
         if time.perf_counter() - t > timeout:
@@ -470,63 +514,62 @@ Word available: {data.get('word_available')}.</p>
     return jpath, hpath
 
 
-def pick_folder():
-    try:
-        import tkinter
-        from tkinter import filedialog
-        root = tkinter.Tk(); root.withdraw()
-        d = filedialog.askdirectory(title="FormatCheck: pick the folder with the volumes to check (read-only)")
-        root.destroy()
-        return d
-    except Exception:
-        return None
-
-
-def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "--word-worker":
-        word_worker(sys.argv[2], sys.argv[3], sys.argv[4])
-        return
-    if len(sys.argv) > 1 and sys.argv[1] == "--option-check":
-        option_check(sys.argv[2] == "1")
-        return
-    ap = argparse.ArgumentParser()
-    ap.add_argument("folder", nargs="?")
-    ap.add_argument("--no-word", action="store_true")
-    ap.add_argument("--keep", action="store_true", help="keep the local copies after the run")
-    ap.add_argument("--timeout", type=int, default=1200, help="seconds per Word job")
-    ap.add_argument("--recursive", action="store_true")
-    ap.add_argument("--work", help="folder for the local copies and the report (default: FormatCheck_runs next to the program)")
-    a = ap.parse_args()
-    folder = a.folder or pick_folder()
-    if not folder or not os.path.isdir(folder):
-        print("No folder selected."); return
+def find_files(folder, recursive):
     files = []
     for dp, dn, fn in os.walk(folder):
         for f in sorted(fn):
             if f.lower().endswith(EXTS) and not f.startswith(("~$", "~pe_tmp_")):
                 files.append(os.path.join(dp, f))
-        if not a.recursive:
+        if not recursive:
             break
+    return files
+
+
+def _exe():
+    return [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, os.path.abspath(__file__)]
+
+
+def run_check(folder, recursive=False, use_word=True, timeout=1200, keep=False, work=None,
+              progress=print, should_stop=lambda: False, on_doc=None):
+    """Check every Word file in folder on local copies. progress(text) gets status lines with Doc-N only, never names.
+    should_stop() is asked between documents. on_doc(i, n) after each document. Returns (data, html_path)."""
+    files = find_files(folder, recursive)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     # next to the program, not in AppData: packaged apps can redirect AppData so Word would not see the copies
-    base = os.path.join(a.work or os.path.join(HERE, "FormatCheck_runs"), f"run_{stamp}")
+    base = os.path.join(work or RUNS_DIR, f"run_{stamp}")
     os.makedirs(base, exist_ok=True)
     keymap = open(os.path.join(base, "KEY_stays_on_this_PC.txt"), "w", encoding="utf-8")
     links_option = None
-    word_ok = (not a.no_word) and sys.platform == "win32"
+    word_ok = use_word and sys.platform == "win32"
     data = {"version": VERSION, "run": stamp, "word_available": word_ok, "documents": []}
-    print(f"FormatCheck {VERSION}: {len(files)} documents. Work folder: {base}")
+    exts = collections.Counter(os.path.splitext(f)[1].lower() for f in files)
+    diag.run_started(docs=len(files), word=int(word_ok), recursive=int(recursive), timeout=timeout,
+                     **{f"ext_{e.strip('.')}": c for e, c in exts.items()})
+    progress(f"FormatCheck {VERSION}: {len(files)} documents.")
+    stopped = False
     for i, src in enumerate(files, 1):
+        if should_stop():
+            stopped = True
+            progress("Stopped before the next document.")
+            break
         did = f"Doc-{i}"
+        t_doc = time.perf_counter()
         ext = os.path.splitext(src)[1].lower()
         keymap.write(f"{did}\t{src}\n"); keymap.flush()
         d = {"id": did, "type": ext}
-        h0 = sha(src)
-        work = os.path.join(base, did + ext)
-        shutil.copyfile(src, work)  # copyfile: data only, no attributes such as read-only
+        progress(f"{did} of {len(files)}: copying")
+        try:
+            h0 = sha(src)
+            work_copy = os.path.join(base, did + ext)
+            shutil.copyfile(src, work_copy)  # copyfile: data only, no attributes such as read-only
+        except Exception:
+            d["load"] = "refused: could not copy"
+            diag.error("copy", "Could not read or copy a document", exc=True)
+            data["documents"].append(d); write_report(base, data)
+            continue
         try:
             t = time.perf_counter()
-            pkg = Package(work)
+            pkg = Package(work_copy)
             d["load"] = "accepted"
             d["load_s"] = round(time.perf_counter() - t, 2)
             d["structure"] = structure(pkg)
@@ -535,58 +578,154 @@ def main():
             d["load"] = "refused: " + category(e)
         except Exception as e:
             d["load"] = "error: " + type(e).__name__
+            diag.error("load", "Loading a document raised an error", exc=True)
         if d["load"] == "accepted":
-            print(f"  {did}: operations in memory")
-            d["dry"] = dry_ops(work)
+            progress(f"{did}: operations in memory")
+            d["dry"] = dry_ops(work_copy)
             before_copy = os.path.join(base, did + "_original" + ext)
-            shutil.copyfile(work, before_copy)
-            print(f"  {did}: full recipe on the copy")
-            d["recipe"] = recipe(work)
+            shutil.copyfile(work_copy, before_copy)
+            progress(f"{did}: full fix on the copy")
+            d["recipe"] = recipe(work_copy)
             if word_ok and ext in (".docx", ".docm"):
-                print(f"  {did}: Word check (up to {a.timeout} s)")
+                progress(f"{did}: Word check (up to {timeout} s)")
                 # a fresh name for every Word job: after a forced stop Word remembers the file name and asks
                 # "it caused a serious error, open it anyway?" the next time a file of that name opens
                 tag = uuid.uuid4().hex[:8]
                 wb, wa = os.path.join(base, f"{did}_{tag}_b{ext}"), os.path.join(base, f"{did}_{tag}_a{ext}")
-                shutil.copyfile(before_copy, wb); shutil.copyfile(work, wa)
+                shutil.copyfile(before_copy, wb); shutil.copyfile(work_copy, wa)
                 try:
-                    d["word"] = run_word(wb, wa, a.timeout)
+                    d["word"] = run_word(wb, wa, timeout)
                 except Exception as e:
                     d["word"] = {"worker_failed": True, "why": type(e).__name__}
+                    diag.error("word", "Starting the Word check failed", exc=True)
                 for f in (wb, wa):
-                    if os.path.exists(f):
-                        os.remove(f)
-                if "update_links_at_open_original" in d["word"] and links_option is None:
-                    links_option = d["word"]["update_links_at_open_original"]
-        d["original_untouched"] = sha(src) == h0
+                    try:
+                        if os.path.exists(f):
+                            os.remove(f)
+                    except Exception:
+                        diag.swallowed("cleanup")
+                wk = d["word"]
+                if wk.get("blocked_by_dialog"):
+                    diag.warning("word", "Word showed a dialog and the check ended", code=_code(wk["blocked_by_dialog"]))
+                if wk.get("timed_out"):
+                    diag.warning("word", "Word check ran out of time", seconds=int(wk.get("seconds", 0)))
+                if wk.get("worker_failed"):
+                    diag.error("word", "Word check gave no result")
+                if wk.get("word_left_running"):
+                    diag.warning("word", "A Word could not be identified and was left running")
+                if "update_links_at_open_original" in wk and links_option is None:
+                    links_option = wk["update_links_at_open_original"]
+        try:
+            d["original_untouched"] = sha(src) == h0
+        except Exception:
+            d["original_untouched"] = None
+            diag.error("copy", "Could not re-read an original", exc=True)
+        if d.get("original_untouched") is False:
+            diag.error("copy", "An original changed during the run")
         data["documents"].append(d)
         write_report(base, data)
+        _doc_activity(d, time.perf_counter() - t_doc)
+        if on_doc:
+            on_doc(i, len(files))
     keymap.close()
     if links_option is not None:
-        exe = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, os.path.abspath(__file__)]
+        out_path = os.path.join(base, "option_check.json")
         try:
-            out = subprocess.run(exe + ["--option-check", "1" if links_option else "0"], capture_output=True, text=True,
-                                 timeout=120, creationflags=0x08000000).stdout
-            data["word_link_option_check"] = json.loads(out.strip().splitlines()[-1])
+            subprocess.run(_exe() + ["--option-check", "1" if links_option else "0", out_path], timeout=120,
+                           creationflags=0x08000000)
+            data["word_link_option_check"] = json.load(open(out_path))
+            os.remove(out_path)
         except Exception as e:
             data["word_link_option_check"] = {"ok": None, "why": type(e).__name__}
-    if not a.keep:
+            diag.error("word", "Link option check did not run", exc=True)
+        if not (data["word_link_option_check"] or {}).get("ok"):
+            diag.error("word", "Link option could not be confirmed")
+    if not keep:
         for f in os.listdir(base):
             p = os.path.join(base, f)
-            if f.startswith("Doc-") or f == safewrite.SNAP_DIR:
-                shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+            try:
+                if f.startswith("Doc-") or f == safewrite.SNAP_DIR:
+                    shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+            except Exception:
+                diag.swallowed("cleanup")
+    data["stopped"] = stopped
     j, h = write_report(base, data)
-    print(f"Done. Report: {h}")
-    print("Share FormatCheck_report.json or .html if you want: they hold counts only. Keep KEY_stays_on_this_PC.txt local.")
+    docs = data["documents"]
+    diag.run_finished(stopped=stopped, docs=len(docs), accepted=sum(1 for d in docs if d.get("load") == "accepted"),
+                      refused=sum(1 for d in docs if str(d.get("load", "")).startswith("refused")),
+                      kept=sum(1 for d in docs if d.get("original_untouched")))
+    progress(f"Done. {len(docs)} documents checked. Report: {os.path.basename(h)}")
+    return data, h
+
+
+def _code(title):
+    """A dialog title as a short code for the log ('microsoft_word_security_notice'), or 'dialog'."""
+    import re as _re
+    c = _re.sub(r"[^a-z0-9]+", "_", (title or "").lower()).strip("_")[:40]
+    return c if _re.match(r"^[a-z][a-z0-9_]{0,40}$", c or "") and c not in ("",) else "dialog"
+
+
+def _doc_activity(d, secs):
+    dry = d.get("dry", {})
+    steps = d.get("recipe", [])
+    wk = d.get("word", {})
+    st = d.get("structure", {})
+    load = str(d.get("load", ""))
+    counts = {"seconds": int(secs), "accepted": int(load == "accepted"), "refused": int(load.startswith("refused")),
+              "paragraphs": st.get("paragraphs", 0) if isinstance(st.get("paragraphs"), int) else 0,
+              "tables": st.get("tables", 0) if isinstance(st.get("tables"), int) else 0,
+              "guard_trips": sum(1 for v in dry.values() if v.get("why") == "touch elements it did not declare"),
+              "op_errors": sum(1 for v in dry.values() if v.get("result") == "error"),
+              "failed": sum(1 for s_ in steps if not s_.get("ok"))}
+    if wk:
+        b, a = wk.get("before", {}), wk.get("after", {})
+        counts.update({"word": 1, "blocked": int(bool(wk.get("blocked_by_dialog"))), "timed_out": int(bool(wk.get("timed_out"))),
+                       "drift": len(set(a.get("resave_drift", []) or [])), "linked": b.get("linked_fields_locked", 0) or 0})
+        if isinstance(b.get("pages"), int):
+            counts["pages"] = b["pages"]
+        if isinstance(a.get("pages"), int):
+            counts["pages_after"] = a["pages"]
+    if load.startswith("refused"):
+        counts["code"] = _code(load.split(": ", 1)[-1])
+    diag.activity("doc_done", ext=d.get("type"), **counts)
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--word-worker":
+        word_worker(sys.argv[2], sys.argv[3], sys.argv[4])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "--option-check":
+        option_check(sys.argv[2] == "1", sys.argv[3])
+        return
+    diag.setup(LOG_DIR, VERSION)
     try:
-        os.startfile(h)
-    except Exception:
-        pass
+        if len(sys.argv) == 1:
+            sys.modules.setdefault("fieldcheck", sys.modules[__name__])  # the window imports this module by name
+            import gui
+            gui.main()
+            return
+        ap = argparse.ArgumentParser()
+        ap.add_argument("folder")
+        ap.add_argument("--no-word", action="store_true")
+        ap.add_argument("--keep", action="store_true", help="keep the local copies after the run")
+        ap.add_argument("--timeout", type=int, default=1200, help="seconds per Word job")
+        ap.add_argument("--recursive", action="store_true")
+        ap.add_argument("--work", help="folder for the local copies and the report (default: FormatCheck_runs next to the program)")
+        ap.add_argument("--no-open", action="store_true", help="do not open the report at the end")
+        a = ap.parse_args()
+        if not os.path.isdir(a.folder):
+            print("Folder not found."); return
+        diag.activity("command_line_run")
+        data, h = run_check(a.folder, a.recursive, not a.no_word, a.timeout, a.keep, a.work)
+        print("Share FormatCheck_report.json or .html if you want: they hold counts only. Keep KEY_stays_on_this_PC.txt local.")
+        if not a.no_open:
+            try:
+                os.startfile(h)
+            except Exception:
+                diag.swallowed("report")
+    finally:
+        diag.shutdown()
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        traceback.print_exc()
-        input("FormatCheck stopped with an error. Press Enter to close.")
+    main()
