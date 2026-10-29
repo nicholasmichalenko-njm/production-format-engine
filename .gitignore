@@ -25,3 +25,6 @@ run_all_v2.ps1
 
 # never commit real proposal content: real documents go only through FormatCheck, on the work PC
 *.real.docx
+
+logs/
+feedback/
